@@ -34,4 +34,15 @@ public interface NotificationJobRepository extends JpaRepository<NotificationJob
 
     @Query("SELECT j FROM NotificationJob j WHERE j.status = 'SCHEDULED' AND j.scheduledAt <= :now")
     List<NotificationJob> findDueScheduledJobs(@Param("now") Instant now);
+
+    @Query("SELECT j FROM NotificationJob j WHERE j.tenantId = :tenantId "
+            + "AND j.status = COALESCE(:status, j.status) "
+            + "AND j.createdAt >= COALESCE(:startDate, j.createdAt) "
+            + "AND j.createdAt <= COALESCE(:endDate, j.createdAt) "
+            + "ORDER BY j.createdAt DESC")
+    Page<NotificationJob> findByFilters(@Param("tenantId") UUID tenantId,
+            @Param("status") NotificationJobStatus status,
+            @Param("startDate") Instant startDate,
+            @Param("endDate") Instant endDate,
+            Pageable pageable);
 }

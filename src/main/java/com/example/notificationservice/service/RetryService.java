@@ -26,11 +26,14 @@ public class RetryService {
 
     public Duration calculateBackoffDelay(int attemptNumber) {
         long uncappedDelayMs = (long) Math.pow(2, attemptNumber) * BASE_DELAY_MS;
-        long delayMs = Math.min(uncappedDelayMs, MAX_DELAY_MS);
-        long jitteredDelayMs = getJitter(delayMs);
+        long jitteredDelayMs = getJitter(uncappedDelayMs);
+        // Jitter is applied before capping, not after: jittering an already-capped value can
+        // scale it up to 1.2x, pushing it back over MAX_DELAY_MS and silently breaking the
+        // "never wait more than 30s" guarantee. Clamping the final value keeps that a hard ceiling.
+        long cappedDelayMs = Math.min(jitteredDelayMs, MAX_DELAY_MS);
 
-        log.debug("Calculated backoff delay for attempt {}: {}ms (jittered)", attemptNumber, jitteredDelayMs);
-        return Duration.ofMillis(jitteredDelayMs);
+        log.debug("Calculated backoff delay for attempt {}: {}ms (jittered)", attemptNumber, cappedDelayMs);
+        return Duration.ofMillis(cappedDelayMs);
     }
 
     public boolean shouldRetry(int currentRetry, int maxRetries) {
