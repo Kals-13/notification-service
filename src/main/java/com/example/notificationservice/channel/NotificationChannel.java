@@ -13,5 +13,8 @@ public interface NotificationChannel {
 
     String getChannelName();
 
-    boolean send(NotificationJob job);
+    /**
+     * Sends notification via this channel with the rendered template body.
+     */
+    boolean send(NotificationJob job, String renderedBody);
 }

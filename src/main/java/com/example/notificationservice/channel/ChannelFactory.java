@@ -21,7 +21,7 @@ public class ChannelFactory {
     public NotificationChannel getChannel(String channelName) {
         NotificationChannel channel = channelsByName.get(channelName.toUpperCase());
         if (channel == null) {
-            throw new ChannelNotFoundException(channelName);
+            throw new ChannelNotFoundException("Channel not found: " + channelName);
         }
         return channel;
     }

@@ -16,8 +16,8 @@ public class EmailChannel implements NotificationChannel {
     }
 
     @Override
-    public boolean send(NotificationJob job) {
-        log.info("Sending email to {} from template {}", job.getRecipientEmail(), job.getTemplateId());
+    public boolean send(NotificationJob job, String renderedBody) {
+        log.info("Sending email to {} with body: {}", job.getRecipientEmail(), renderedBody);
         // In real implementation, would call SMTP/SendGrid/AWS SES
         return true;
     }

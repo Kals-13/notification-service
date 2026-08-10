@@ -16,8 +16,8 @@ public class SMSChannel implements NotificationChannel {
     }
 
     @Override
-    public boolean send(NotificationJob job) {
-        log.info("Sending SMS to {} from template {}", job.getRecipientPhone(), job.getTemplateId());
+    public boolean send(NotificationJob job, String renderedBody) {
+        log.info("Sending SMS to {} from template {} with body: {}", job.getRecipientPhone(), job.getTemplateId(), renderedBody);
         // In real implementation, would call Twilio/AWS SNS
         return true;
     }

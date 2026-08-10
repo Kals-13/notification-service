@@ -16,8 +16,8 @@ public class PushChannel implements NotificationChannel {
     }
 
     @Override
-    public boolean send(NotificationJob job) {
-        log.info("Sending push notification from template {}", job.getTemplateId());
+    public boolean send(NotificationJob job, String renderedBody) {
+        log.info("Sending push notifications from template {} with body: {}", job.getTemplateId(), renderedBody);
         // In real implementation, would call Firebase Cloud Messaging
         return true;
     }

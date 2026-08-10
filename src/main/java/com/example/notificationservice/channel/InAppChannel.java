@@ -16,8 +16,8 @@ public class InAppChannel implements NotificationChannel {
     }
 
     @Override
-    public boolean send(NotificationJob job) {
-        log.info("Sending in-app notification from template {}", job.getTemplateId());
+    public boolean send(NotificationJob job, String renderedBody) {
+        log.info("Sending in-app notification from template {} with body: {}", job.getTemplateId(), renderedBody);
         // In real implementation, would store in database or cache
         return true;
     }
