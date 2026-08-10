@@ -2,7 +2,9 @@ package com.example.notificationservice.exception;
 
 public class ChannelNotFoundException extends RuntimeException {
 
-    public ChannelNotFoundException(String channelName) {
-        super("Channel not found: " + channelName);
+    private static final long serialVersionUID = 1L;
+
+    public ChannelNotFoundException(String message) {
+        super(message);
     }
 }
