@@ -8,6 +8,7 @@ import com.example.notificationservice.dto.TenantScopedRequest;
 import com.example.notificationservice.exception.ValidationException;
 import com.example.notificationservice.repository.NotificationJobRepository;
 import com.example.notificationservice.service.NotificationSendService;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,10 +61,10 @@ public class NotificationController {
     @PostMapping("/send")
     @PreAuthorize("hasRole('TENANT_ADMIN')")
     public ResponseEntity<NotificationJobDTO> sendNotification(
-            @Valid @RequestBody SendNotificationRequest request, Principal principal) {
+            @Valid @RequestBody SendNotificationRequest request, HttpServletRequest httpRequest, Principal principal) {
         log.debug("Received POST request to /api/notifications/send from user {}", principal.getName());
 
-        NotificationJobDTO result = notificationSendService.sendNotification(request);
+        NotificationJobDTO result = notificationSendService.sendNotification(request, httpRequest);
         return ResponseEntity.ok(result);
     }
 

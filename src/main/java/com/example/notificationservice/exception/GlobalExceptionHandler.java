@@ -39,6 +39,15 @@ public class GlobalExceptionHandler {
                 .body(buildErrorResponse("ENTITY_NOT_FOUND", ex.getMessage(), request));
     }
 
+    @ExceptionHandler(DuplicateIdempotencyKeyException.class)
+    @ResponseStatus(HttpStatus.CONFLICT)
+    public ResponseEntity<ErrorResponse> handleDuplicateIdempotencyKey(
+            DuplicateIdempotencyKeyException ex, HttpServletRequest request) {
+        log.debug("Duplicate idempotency key: {}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(buildErrorResponse("DUPLICATE_REQUEST", ex.getMessage(), request));
+    }
+
     @ExceptionHandler(InvalidTemplateException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ResponseEntity<ErrorResponse> handleInvalidTemplate(InvalidTemplateException ex, HttpServletRequest request) {

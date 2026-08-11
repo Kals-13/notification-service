@@ -19,6 +19,7 @@ import com.example.notificationservice.repository.DeliveryAttemptRepository;
 import com.example.notificationservice.repository.NotificationJobRepository;
 import com.example.notificationservice.repository.NotificationTemplateRepository;
 import com.example.notificationservice.repository.TenantRepository;
+import jakarta.servlet.http.HttpServletRequest;
 import com.example.notificationservice.service.NotificationSendService;
 import com.example.notificationservice.service.RateLimiterService;
 import com.example.notificationservice.service.VariableSubstitutionService;
@@ -73,10 +74,11 @@ import static org.mockito.Mockito.when;
  *       SCHEDULED job (cancel, retryScheduledJobs) persist one directly via the
  *       repository instead of going through sendNotification().</li>
  *   <li>{@code retryFailedNotification} rejects any job whose currentRetry has already
- *       reached maxRetries (IllegalStateException) — which is exactly the state a job
- *       is in once it's genuinely FAILED. That's tested as the real, current contract
- *       rather than asserting a reset-to-QUEUED that the code does not implement; see
- *       the note on {@link #testRetryFailedNotification()}.</li>
+ *       reached maxRetries (IllegalStateException) — which is exactly the state a job is in
+ *       once it's genuinely FAILED, and (since DeadLetterQueueService now listens for exactly
+ *       that) immediately promoted to DEAD_LETTERED. That's tested as the real, current
+ *       contract rather than asserting a reset-to-QUEUED that the code does not implement;
+ *       see the note on {@link #testRetryFailedNotification()}.</li>
  * </ul>
  * {@code @MockBean} no longer exists on this Spring/Boot version (Spring Framework 7);
  * {@code @MockitoBean} is its replacement and is used throughout. Waits use Awaitility
@@ -163,6 +165,16 @@ class NotificationSendServiceIntegrationTest {
         return new SendNotificationRequest(tenantId, templateId, email, null, vars);
     }
 
+    /**
+     * sendNotification() now takes an HttpServletRequest to read an optional idempotency
+     * header. This test predates that and calls the service directly (not over HTTP), so it
+     * needs something to pass; a bare mock with no header stubbed behaves as "no idempotency
+     * key supplied", which is what every existing call site here wants.
+     */
+    private NotificationJobDTO sendNotification(SendNotificationRequest request) {
+        return notificationSendService.sendNotification(request, mock(HttpServletRequest.class));
+    }
+
     private String toJson(Object value) {
         return OBJECT_MAPPER.writeValueAsString(value);
     }
@@ -185,7 +197,7 @@ class NotificationSendServiceIntegrationTest {
         SendNotificationRequest request = createSendRequest(tenant.getId(), template.getId(), "john@example.com",
                 Map.of("firstName", "John", "orderId", "12345"));
 
-        NotificationJobDTO result = notificationSendService.sendNotification(request);
+        NotificationJobDTO result = sendNotification(request);
 
         assertThat(result).isNotNull();
         assertThat(result.status()).isIn("QUEUED", "DELIVERED");
@@ -222,7 +234,7 @@ class NotificationSendServiceIntegrationTest {
         SendNotificationRequest request = createSendRequest(tenant.getId(), template.getId(), "alice@example.com",
                 Map.of("orderId", "ORD-999", "customerName", "Alice", "location", "NYC"));
 
-        NotificationJobDTO result = notificationSendService.sendNotification(request);
+        NotificationJobDTO result = sendNotification(request);
         UUID jobId = result.id();
 
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
@@ -246,7 +258,7 @@ class NotificationSendServiceIntegrationTest {
 
         List<UUID> jobIds = new ArrayList<>();
         for (int i = 0; i < 3; i++) {
-            NotificationJobDTO result = notificationSendService.sendNotification(
+            NotificationJobDTO result = sendNotification(
                     createSendRequest(tenant.getId(), template.getId(), "user" + i + "@example.com", Map.of("x", "1")));
             jobIds.add(result.id());
         }
@@ -282,7 +294,7 @@ class NotificationSendServiceIntegrationTest {
     void testSendNotificationMissingTenant() {
         UUID randomTenantId = UUID.randomUUID();
 
-        assertThatThrownBy(() -> notificationSendService.sendNotification(
+        assertThatThrownBy(() -> sendNotification(
                 createSendRequest(randomTenantId, UUID.randomUUID(), "a@example.com", Map.of())))
                 .isInstanceOf(EntityNotFoundException.class);
 
@@ -295,7 +307,7 @@ class NotificationSendServiceIntegrationTest {
         Tenant tenant = createTenant("NoTemplateTenant", 1000);
         UUID randomTemplateId = UUID.randomUUID();
 
-        assertThatThrownBy(() -> notificationSendService.sendNotification(
+        assertThatThrownBy(() -> sendNotification(
                 createSendRequest(tenant.getId(), randomTemplateId, "a@example.com", Map.of())))
                 .isInstanceOf(EntityNotFoundException.class);
 
@@ -308,7 +320,7 @@ class NotificationSendServiceIntegrationTest {
         Tenant tenant = createTenant("MissingVarTenant", 1000);
         NotificationTemplate template = createTemplate(tenant.getId(), "greet", "Hello ${firstName}", List.of("EMAIL"));
 
-        assertThatThrownBy(() -> notificationSendService.sendNotification(
+        assertThatThrownBy(() -> sendNotification(
                 createSendRequest(tenant.getId(), template.getId(), "a@example.com", Map.of())))
                 .isInstanceOf(InvalidTemplateException.class)
                 .hasMessageContaining("firstName");
@@ -322,7 +334,7 @@ class NotificationSendServiceIntegrationTest {
         Tenant tenant = createTenant("BadEmailTenant", 1000);
         NotificationTemplate template = createTemplate(tenant.getId(), "plain", "Hi", List.of("EMAIL"));
 
-        assertThatThrownBy(() -> notificationSendService.sendNotification(
+        assertThatThrownBy(() -> sendNotification(
                 createSendRequest(tenant.getId(), template.getId(), "not-an-email", Map.of())))
                 .isInstanceOf(ValidationException.class);
 
@@ -336,9 +348,12 @@ class NotificationSendServiceIntegrationTest {
      * currentRetry/maxRetries check happening before the increment) to reach FAILED, then
      * calling retryFailedNotification() on it, throws IllegalStateException rather than
      * resetting the job — that's the real, current contract, so it's what's asserted here.
+     * FAILED itself is transient: DeadLetterQueueService's event listener promotes it to
+     * DEAD_LETTERED synchronously, on the same dispatch thread, right after failJob() runs —
+     * so polling never actually observes FAILED, only the final DEAD_LETTERED state.
      */
     @Test
-    @DisplayName("A job that exhausts retries lands on FAILED; retrying it further is rejected")
+    @DisplayName("A job that exhausts retries lands in the DLQ; retrying it further is rejected")
     void testRetryFailedNotification() {
         Tenant tenant = createTenant("RetryTenant", 1000);
         NotificationTemplate template = createTemplate(tenant.getId(), "retry", "Test ${id}", List.of("EMAIL"));
@@ -347,18 +362,18 @@ class NotificationSendServiceIntegrationTest {
         when(mockChannel.send(any(NotificationJob.class), anyString())).thenReturn(false);
         when(channelFactory.getChannel(anyString())).thenReturn(mockChannel);
 
-        NotificationJobDTO result = notificationSendService.sendNotification(
+        NotificationJobDTO result = sendNotification(
                 createSendRequest(tenant.getId(), template.getId(), "fail@example.com", Map.of("id", "123")));
         UUID jobId = result.id();
 
         for (int round = 0; round < 6; round++) {
             await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
                 NotificationJobStatus status = notificationJobRepository.findById(jobId).orElseThrow().getStatus();
-                assertThat(status).isIn(NotificationJobStatus.SCHEDULED, NotificationJobStatus.FAILED);
+                assertThat(status).isIn(NotificationJobStatus.SCHEDULED, NotificationJobStatus.DEAD_LETTERED);
             });
 
             NotificationJob current = notificationJobRepository.findById(jobId).orElseThrow();
-            if (current.getStatus() == NotificationJobStatus.FAILED) {
+            if (current.getStatus() == NotificationJobStatus.DEAD_LETTERED) {
                 break;
             }
 
@@ -368,9 +383,9 @@ class NotificationSendServiceIntegrationTest {
             notificationSendService.retryScheduledJobs();
         }
 
-        NotificationJob failedJob = notificationJobRepository.findById(jobId).orElseThrow();
-        assertThat(failedJob.getStatus()).isEqualTo(NotificationJobStatus.FAILED);
-        assertThat(failedJob.getCurrentRetry()).isEqualTo(5);
+        NotificationJob deadLetteredJob = notificationJobRepository.findById(jobId).orElseThrow();
+        assertThat(deadLetteredJob.getStatus()).isEqualTo(NotificationJobStatus.DEAD_LETTERED);
+        assertThat(deadLetteredJob.getCurrentRetry()).isEqualTo(5);
 
         List<DeliveryAttempt> attempts = deliveryAttemptRepository.findByJobId(jobId);
         assertThat(attempts).hasSize(6);
@@ -379,6 +394,8 @@ class NotificationSendServiceIntegrationTest {
         assertThat(auditLogRepository.findByTenantIdAndActionOrderByCreatedAtDesc(tenant.getId(), "RETRY_SCHEDULED"))
                 .hasSize(5);
         assertThat(auditLogRepository.findByTenantIdAndActionOrderByCreatedAtDesc(tenant.getId(), "NOTIFICATION_FAILED"))
+                .hasSize(1);
+        assertThat(auditLogRepository.findByTenantIdAndActionOrderByCreatedAtDesc(tenant.getId(), "NOTIFICATION_DEAD_LETTERED"))
                 .hasSize(1);
 
         assertThatThrownBy(() -> notificationSendService.retryFailedNotification(jobId, tenant.getId()))
@@ -420,7 +437,7 @@ class NotificationSendServiceIntegrationTest {
         NotificationTemplate template = createTemplate(tenant.getId(), "status", "Hi ${name}", List.of("EMAIL"));
         mockAllChannelsSucceed();
 
-        NotificationJobDTO sent = notificationSendService.sendNotification(
+        NotificationJobDTO sent = sendNotification(
                 createSendRequest(tenant.getId(), template.getId(), "status@example.com", Map.of("name", "Bob")));
         UUID jobId = sent.id();
 
@@ -459,7 +476,7 @@ class NotificationSendServiceIntegrationTest {
             executor.submit(() -> {
                 try {
                     startLatch.await();
-                    NotificationJobDTO result = notificationSendService.sendNotification(
+                    NotificationJobDTO result = sendNotification(
                             createSendRequest(tenant.getId(), template.getId(), "user" + index + "@example.com", Map.of()));
                     results.get(index).set(result);
                 } catch (InterruptedException e) {
@@ -503,7 +520,7 @@ class NotificationSendServiceIntegrationTest {
         NotificationTemplate template = createTemplate(tenant.getId(), "audit", "Hi", List.of("EMAIL"));
         mockAllChannelsSucceed();
 
-        NotificationJobDTO result = notificationSendService.sendNotification(
+        NotificationJobDTO result = sendNotification(
                 createSendRequest(tenant.getId(), template.getId(), "audit@example.com", Map.of()));
         UUID jobId = result.id();
 
@@ -548,7 +565,7 @@ class NotificationSendServiceIntegrationTest {
         when(channelFactory.getChannel(eq("SMS"))).thenReturn(smsChannel);
         when(channelFactory.getChannel(eq("PUSH"))).thenReturn(pushChannel);
 
-        NotificationJobDTO result = notificationSendService.sendNotification(
+        NotificationJobDTO result = sendNotification(
                 createSendRequest(tenant.getId(), template.getId(), "multi@example.com", Map.of("msg", "hello")));
         UUID jobId = result.id();
 

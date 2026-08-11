@@ -10,14 +10,17 @@ import com.example.notificationservice.domain.NotificationTemplate;
 import com.example.notificationservice.dto.DeliveryAttemptDTO;
 import com.example.notificationservice.dto.NotificationJobDTO;
 import com.example.notificationservice.dto.SendNotificationRequest;
+import com.example.notificationservice.event.MaxRetriesExceededEvent;
 import com.example.notificationservice.exception.EntityNotFoundException;
 import com.example.notificationservice.exception.ValidationException;
 import com.example.notificationservice.repository.DeliveryAttemptRepository;
 import com.example.notificationservice.repository.NotificationJobRepository;
 import com.example.notificationservice.repository.NotificationTemplateRepository;
 import com.example.notificationservice.repository.TenantRepository;
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import tools.jackson.core.JacksonException;
@@ -27,6 +30,7 @@ import tools.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.regex.Pattern;
@@ -54,6 +58,8 @@ public class NotificationSendService {
     private final VariableSubstitutionService variableSubstitutionService;
     private final AuditService auditService;
     private final ScheduledExecutorService scheduledExecutorService;
+    private final IdempotencyKeyService idempotencyKeyService;
+    private final ApplicationEventPublisher eventPublisher;
 
     public NotificationSendService(
             NotificationJobRepository notificationJobRepository,
@@ -65,7 +71,9 @@ public class NotificationSendService {
             ChannelFactory channelFactory,
             VariableSubstitutionService variableSubstitutionService,
             AuditService auditService,
-            ScheduledExecutorService scheduledExecutorService) {
+            ScheduledExecutorService scheduledExecutorService,
+            IdempotencyKeyService idempotencyKeyService,
+            ApplicationEventPublisher eventPublisher) {
         this.notificationJobRepository = notificationJobRepository;
         this.notificationTemplateRepository = notificationTemplateRepository;
         this.tenantRepository = tenantRepository;
@@ -76,9 +84,33 @@ public class NotificationSendService {
         this.variableSubstitutionService = variableSubstitutionService;
         this.auditService = auditService;
         this.scheduledExecutorService = scheduledExecutorService;
+        this.idempotencyKeyService = idempotencyKeyService;
+        this.eventPublisher = eventPublisher;
     }
 
-    public NotificationJobDTO sendNotification(SendNotificationRequest request) {
+    // Idempotency is check-then-store, not the atomic claim IdempotencyKeyService.validateAndStore
+    // offers: this needs to return the ORIGINAL job's data on a duplicate (not reject with an
+    // error), and the job doesn't have an ID to atomically claim a key against until after
+    // save() assigns one. That leaves a narrow window where two requests with the same key
+    // arriving within milliseconds of each other (true concurrent duplicates, not the sequential
+    // network-retry case this feature targets) could both pass the check and each create a job.
+    public NotificationJobDTO sendNotification(SendNotificationRequest request, HttpServletRequest httpRequest) {
+        String idempotencyKey = httpRequest.getHeader("X-Idempotency-Key");
+        boolean hasIdempotencyKey = idempotencyKey != null && !idempotencyKey.isBlank();
+
+        if (hasIdempotencyKey) {
+            idempotencyKeyService.validateIdempotencyKey(idempotencyKey);
+
+            Optional<UUID> existingJobId = idempotencyKeyService.getJobIdIfExists(idempotencyKey);
+            if (existingJobId.isPresent()) {
+                log.info("Duplicate request: returning cached job {}", existingJobId.get());
+                NotificationJob cachedJob = notificationJobRepository.findById(existingJobId.get())
+                        .orElseThrow(() -> new EntityNotFoundException(
+                                "Cached notification job not found: " + existingJobId.get()));
+                return toNotificationJobDTO(cachedJob);
+            }
+        }
+
         tenantRepository.findById(request.tenantId())
                 .orElseThrow(() -> new EntityNotFoundException("Tenant not found: " + request.tenantId()));
 
@@ -98,6 +130,11 @@ public class NotificationSendService {
         job.setVariables(serializeVariables(variables));
 
         NotificationJob savedJob = notificationJobRepository.save(job);
+
+        if (hasIdempotencyKey) {
+            idempotencyKeyService.storeKey(idempotencyKey, savedJob.getId());
+            log.info("Idempotency key stored for job {}", savedJob.getId());
+        }
 
         dispatchAsync(savedJob.getId(), savedJob.getTenantId());
 
@@ -129,6 +166,26 @@ public class NotificationSendService {
                 .orElseThrow(() -> new EntityNotFoundException("Notification job not found: " + jobId));
         List<DeliveryAttempt> attempts = deliveryAttemptRepository.findByJobIdOrderByAttemptNumberDesc(jobId);
         return toDto(job, attempts);
+    }
+
+    /**
+     * Converts an already-fetched job into its DTO, attempts included. Exposed for callers
+     * (e.g. a paginated report listing) that already hold the job entity and don't need the
+     * tenantId-ownership lookup {@link #getNotificationStatus} does.
+     */
+    public NotificationJobDTO toNotificationJobDTO(NotificationJob job) {
+        List<DeliveryAttempt> attempts = deliveryAttemptRepository.findByJobIdOrderByAttemptNumberDesc(job.getId());
+        return toDto(job, attempts);
+    }
+
+    /**
+     * Dispatches a job that some other caller has already put into a dispatchable state
+     * (e.g. DeadLetterQueueService resetting a retried job's status/currentRetry/lastError)
+     * without the retry-budget or ownership checks sendNotification()/retryFailedNotification()
+     * apply - the caller is responsible for that.
+     */
+    public void redispatchJob(UUID jobId, UUID tenantId) {
+        dispatchAsync(jobId, tenantId);
     }
 
     public void cancelScheduledNotification(UUID jobId, UUID tenantId) {
@@ -263,6 +320,14 @@ public class NotificationSendService {
                 auditService.logRetryScheduled(tenantId, jobId, channelException.getMessage(), nextRetryAt);
             } else {
                 failJob(job, tenantId, channelException.getMessage());
+                // Only the genuine retry-exhaustion path feeds the DLQ — not the other
+                // failJob() call sites (missing template, bad channel config, no channels
+                // configured), which fail immediately without ever having a retry budget to
+                // exhaust. Published as an event rather than a direct call to avoid a circular
+                // dependency: DeadLetterQueueService already depends on this class to redispatch
+                // a job retried out of the DLQ.
+                eventPublisher.publishEvent(new MaxRetriesExceededEvent(
+                        jobId, "Max retries exceeded: " + channelException.getMessage()));
             }
         }
     }

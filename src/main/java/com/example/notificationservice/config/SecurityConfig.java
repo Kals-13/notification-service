@@ -50,6 +50,7 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/api/notifications/**").hasRole("TENANT_ADMIN")
                         .requestMatchers(HttpMethod.POST, "/api/notifications/{id}/retry").hasRole("TENANT_ADMIN")
                         .requestMatchers(HttpMethod.DELETE, "/api/notifications/{id}").hasRole("TENANT_ADMIN")
+                        .requestMatchers("/api/dlq/**").hasRole("TENANT_ADMIN")
                         .anyRequest().authenticated())
                 .httpBasic(basic -> basic.authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
                 .exceptionHandling(exceptions -> exceptions

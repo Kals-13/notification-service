@@ -81,6 +81,44 @@ public class AuditService {
         log(tenantId, "NOTIFICATION_CANCELLED", "NOTIFICATION", jobId, toJson(new LinkedHashMap<>()));
     }
 
+    public void logNotificationDeadLettered(UUID tenantId, UUID jobId, String reason) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("reason", reason);
+        log(tenantId, "NOTIFICATION_DEAD_LETTERED", "NOTIFICATION", jobId, toJson(details));
+    }
+
+    public void logNotificationRetriedFromDLQ(UUID tenantId, UUID jobId) {
+        log(tenantId, "NOTIFICATION_RETRIED_FROM_DLQ", "NOTIFICATION", jobId, toJson(new LinkedHashMap<>()));
+    }
+
+    public void logTemplateUpdated(UUID tenantId, UUID templateId, String templateName) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("templateName", templateName);
+        log(tenantId, "TEMPLATE_UPDATED", "TEMPLATE", templateId, toJson(details));
+    }
+
+    public void logTemplateDeleted(UUID tenantId, UUID templateId, String templateName) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("templateName", templateName);
+        log(tenantId, "TEMPLATE_DELETED", "TEMPLATE", templateId, toJson(details));
+    }
+
+    public void logTenantCreated(UUID tenantId, String tenantName) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("tenantName", tenantName);
+        log(tenantId, "TENANT_CREATED", "TENANT", tenantId, toJson(details));
+    }
+
+    public void logRateLimitsUpdated(UUID tenantId) {
+        log(tenantId, "RATE_LIMITS_UPDATED", "TENANT", tenantId, toJson(new LinkedHashMap<>()));
+    }
+
+    public void logTenantDeleted(UUID tenantId, String tenantName) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("tenantName", tenantName);
+        log(tenantId, "TENANT_DELETED", "TENANT", tenantId, toJson(details));
+    }
+
     private String toJson(Map<String, Object> details) {
         try {
             return OBJECT_MAPPER.writeValueAsString(details);
